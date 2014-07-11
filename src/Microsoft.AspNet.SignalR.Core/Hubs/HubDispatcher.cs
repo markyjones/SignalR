@@ -294,14 +294,12 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return hub.OnReconnected();
         }
 
-        internal static async Task Disconnect(IHub hub, bool stopCalled)
+        internal static Task Disconnect(IHub hub, bool stopCalled)
         {
-            await hub.OnDisconnected(stopCalled).OrEmpty();
-
-            if (stopCalled)
+            return hub.OnDisconnected(stopCalled).OrEmpty().ContinueWith((t, h) =>
             {
-                await hub.OnDisconnected().OrEmpty();
-            }
+                return ((IHub)h).OnDisconnected().OrEmpty();
+            }, hub).Unwrap();
         }
 
         [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "A faulted task is returned.")]
