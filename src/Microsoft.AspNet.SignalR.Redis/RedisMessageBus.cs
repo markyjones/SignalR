@@ -6,7 +6,9 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
-using BookSleeve;
+
+using StackExchange.Redis;
+
 using Microsoft.AspNet.SignalR.Messaging;
 using Microsoft.AspNet.SignalR.Tracing;
 
@@ -19,13 +21,14 @@ namespace Microsoft.AspNet.SignalR.Redis
     {
         private const int DefaultBufferSize = 1000;
 
-        private readonly int _db;
+        private readonly int _database;
         private readonly string _key;
-        private readonly Func<RedisConnection> _connectionFactory;
+        private readonly Func<ConfigurationOptions> _configurationOptionsFactory;
         private readonly TraceSource _trace;
 
-        private RedisConnection _connection;
-        private RedisSubscriberConnection _channel;
+        private ConnectionMultiplexer _connection;
+
+        private StackExchange.Redis.ISubscriber _channel;
         private int _state;
         private readonly object _callbackLock = new object();
 
@@ -37,11 +40,11 @@ namespace Microsoft.AspNet.SignalR.Redis
             {
                 throw new ArgumentNullException("configuration");
             }
-
-            _connectionFactory = configuration.ConnectionFactory;
-            _db = configuration.Database;
+                        
+            _configurationOptionsFactory = configuration.ConfigurationOptionsFactory;
+            _database = configuration.Database;
             _key = configuration.EventKey;
-
+           
             var traceManager = resolver.Resolve<ITraceManager>();
             _trace = traceManager["SignalR." + typeof(RedisMessageBus).Name];
 
@@ -53,10 +56,11 @@ namespace Microsoft.AspNet.SignalR.Redis
 
         protected override Task Send(int streamIndex, IList<Message> messages)
         {
-            var keys = new string[] { _key };
-            var arguments = new object[] { RedisMessage.ToBytes(messages) };
-            return _connection.Scripting.Eval(
-                _db,
+            var database = _connection.GetDatabase(_database);
+
+            var keys = new RedisKey[] { _key };
+            var arguments = new RedisValue[] { RedisMessage.ToBytes(messages) };
+            return database.ScriptEvaluateAsync(
                 @"local newId = redis.call('INCR', KEYS[1])
                   local payload = newId .. ' ' .. ARGV[1]
                   return redis.call('PUBLISH', KEYS[1], payload)",
@@ -97,27 +101,20 @@ namespace Microsoft.AspNet.SignalR.Redis
             if (_channel != null)
             {
                 _channel.Unsubscribe(_key);
-                _channel.Close(abort: true);
+                _channel = null;
             }
 
             if (_connection != null)
             {
-                _connection.Close(abort: true);
+                _connection.Close(allowCommandsToComplete:false);
             }
 
             Interlocked.Exchange(ref _state, State.Disposed);
         }
-
-        private void OnConnectionClosed(object sender, EventArgs e)
+        
+        private void OnConnectionFailed(object sender, ConnectionFailedEventArgs e)
         {
-            _trace.TraceInformation("OnConnectionClosed()");
-
-            AttemptReconnect(exception: new RedisConnectionClosedException());
-        }
-
-        private void OnConnectionError(object sender, ErrorEventArgs e)
-        {
-            _trace.TraceError("OnConnectionError - " + e.Cause + ". " + e.Exception.GetBaseException());
+            _trace.TraceError("OnConnectionError - " + e.FailureType + ". " + e.Exception.GetBaseException());
 
             AttemptReconnect(e.Exception);
         }
@@ -195,39 +192,29 @@ namespace Microsoft.AspNet.SignalR.Redis
         {
             if (_connection != null)
             {
-                _connection.Closed -= OnConnectionClosed;
-                _connection.Error -= OnConnectionError;
+                _connection.ConnectionFailed -= OnConnectionFailed;
                 _connection.Dispose();
                 _connection = null;
             }
-
-            // Create a new connection to redis with the factory
-            RedisConnection connection = _connectionFactory();
-
-            connection.Closed += OnConnectionClosed;
-            connection.Error += OnConnectionError;
-
+                      
             try
             {
                 _trace.TraceInformation("Connecting...");
 
-                // Start the connection
-                return connection.Open().Then(() =>
+                return ConnectionMultiplexer.ConnectAsync(_configurationOptionsFactory()).Then((connection) =>
                 {
+                    connection.ConnectionFailed += OnConnectionFailed;
+
                     _trace.TraceInformation("Connection opened");
 
                     // Create a subscription channel in redis
-                    RedisSubscriberConnection channel = connection.GetOpenSubscriberChannel();
-                    channel.CompletionMode = ResultCompletionMode.PreserveOrder;
+                    _channel = connection.GetSubscriber();
+                    connection.PreserveAsyncOrder = true;
 
-                    // Subscribe to the registered connections
-                    return channel.Subscribe(_key, OnMessage).Then(() =>
-                    {
-                        _trace.TraceVerbose("Subscribed to event " + _key);
+                    _channel.Subscribe(_key, (channel, message) => OnMessage(channel, message));
+                    _trace.TraceVerbose("Subscribed to event " + _key);
 
-                        _channel = channel;
-                        _connection = connection;
-                    });
+                    _connection = connection;
                 });
             }
             catch (Exception ex)

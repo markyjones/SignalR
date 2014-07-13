@@ -1,7 +1,7 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
-using BookSleeve;
+using StackExchange.Redis;
 using Microsoft.AspNet.SignalR.Messaging;
 
 namespace Microsoft.AspNet.SignalR
@@ -12,14 +12,14 @@ namespace Microsoft.AspNet.SignalR
     public class RedisScaleoutConfiguration : ScaleoutConfiguration
     {
         public RedisScaleoutConfiguration(string server, int port, string password, string eventKey)
-            : this(MakeConnectionFactory(server, port, password), eventKey)
+            : this(MakeConfigurationOptionsFactory(server, port, password), eventKey)
         {
 
         }
 
-        public RedisScaleoutConfiguration(Func<RedisConnection> connectionFactory, string eventKey)
+        public RedisScaleoutConfiguration(Func<ConfigurationOptions> configurationOptionsFactory, string eventKey)
         {
-            if (connectionFactory == null)
+            if (configurationOptionsFactory == null)
             {
                 throw new ArgumentNullException("connectionFactory");
             }
@@ -29,11 +29,11 @@ namespace Microsoft.AspNet.SignalR
                 throw new ArgumentNullException("eventKey");
             }
 
-            ConnectionFactory = connectionFactory;
+            ConfigurationOptionsFactory = configurationOptionsFactory;
             EventKey = eventKey;
         }
 
-        internal Func<RedisConnection> ConnectionFactory { get; private set; }
+        internal Func<ConfigurationOptions> ConfigurationOptionsFactory { get; private set; }
 
         /// <summary>
         /// The Redis database instance to use.
@@ -46,9 +46,9 @@ namespace Microsoft.AspNet.SignalR
         /// </summary>
         public string EventKey { get; private set; }
 
-        private static Func<RedisConnection> MakeConnectionFactory(string server, int port, string password)
+        private static Func<ConfigurationOptions> MakeConfigurationOptionsFactory(string server, int port, string password)
         {
-            return () => new RedisConnection(server, port: port, password: password);
+            return () => ConfigurationOptions.Parse(string.Format("{0}:{1},password={2}", server, port, password));
         }
     }
 }
